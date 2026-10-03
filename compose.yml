@@ -1,0 +1,35 @@
+services:
+  user:
+    build: .
+    container_name: user
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - web-penus-network
+
+  postgres:
+    image: postgres:17
+    container_name: db-user
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - web-penus-network      
+
+volumes:
+  pgdata:
+
+networks:
+  web-penus-network:
+    external: true
