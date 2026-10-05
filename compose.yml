@@ -33,6 +33,8 @@ services:
       - "3002:4224"
     volumes:
       - dbx-data:/app/data
+    networks:
+      - web-penus-network            
 
 volumes:
   pgdata:
