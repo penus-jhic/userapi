@@ -17,8 +17,8 @@ Tabel pengguna mendukung tipe ENUM Role:
 2. `KEPALA_SEKOLAH`: Kepala Sekolah
 3. `GURU`: Tenaga Pendidik / Guru
 4. `TU`: Tenaga Kependidikan / Tata Usaha
-5. `SISWA`: Peserta Didik
-6. `ORANG_TUA`: Orang Tua / Wali Murid
+5. `SISWA`: Peserta Didik 
+6. `ORANG_TUA`: Orang Tua / Wali Murid 
 7. `BENDAHARA`: Bagian Keuangan / SPP
 8. `BK`: Guru Bimbingan Konseling
 
@@ -101,6 +101,8 @@ Memverifikasi `access_token` dan mengembalikan seluruh record database pengguna 
 
 - **Method**: `POST`
 - **URL**: `/api/user/verify`
+- **Cache**: Mendukung in-memory caching dengan key JWT dan TTL tersinkronisasi dengan waktu kedaluwarsa JWT (`exp`).
+- **Response Headers**: `X-Cache: HIT` (jika data diambil dari cache) atau `X-Cache: MISS` (jika query ke DB lalu disimpan ke cache).
 - **Request Body** (atau gunakan Header / Cookie):
 ```json
 {

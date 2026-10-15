@@ -11,6 +11,15 @@ import {
 import { USER_ROLES, USER_ROLES_ARRAY } from '../src/constants/roles.js';
 import { extractToken } from '../src/middlewares/auth.middleware.js';
 import app from '../src/app.js';
+import { User } from '../src/models/user.model.js';
+import {
+  verifyCache,
+  getVerifyCache,
+  setVerifyCache,
+  invalidateUserCache,
+  invalidateTokenCache,
+  clearAllCache
+} from '../src/services/cache.service.js';
 
 test('1. Role constants & values validation', () => {
   assert.equal(USER_ROLES.KEPALA_SEKOLAH, 'KEPALA_SEKOLAH');
@@ -222,5 +231,170 @@ test('9. HTTP Server & Endpoints Integration (Health, 404, Zod Error, Token Miss
     assert.equal(bodyBadCookie.message, 'access_token tidak valid');
   } finally {
     server.close();
+  }
+});
+
+test('10. Cache Service Unit Tests (set, get, TTL matching, multi-token user invalidation)', () => {
+  clearAllCache();
+
+  const userA = {
+    id: 'user-uuid-aaa',
+    username: 'guru_matematika',
+    role: USER_ROLES.GURU
+  };
+  const tokenA1 = 'jwt-token-a1-test';
+  const tokenA2 = 'jwt-token-a2-test';
+
+  const userB = {
+    id: 'user-uuid-bbb',
+    username: 'siswa_budi',
+    role: USER_ROLES.SISWA
+  };
+  const tokenB1 = 'jwt-token-b1-test';
+
+  // 1. Set cache dengan TTL (misal 300 detik)
+  setVerifyCache(tokenA1, userA, 300, userA.id);
+  setVerifyCache(tokenA2, userA, 600, userA.id);
+  setVerifyCache(tokenB1, userB, 300, userB.id);
+
+  // 2. Get cache verifikasi
+  assert.deepEqual(getVerifyCache(tokenA1), userA);
+  assert.deepEqual(getVerifyCache(tokenA2), userA);
+  assert.deepEqual(getVerifyCache(tokenB1), userB);
+  assert.equal(getVerifyCache('token-tidak-ada'), null);
+
+  // 3. TTL verification: node-cache getTtl mengembalikan timestamp ms masa berlaku
+  const ttlA1 = verifyCache.getTtl(tokenA1);
+  const now = Date.now();
+  assert.ok(ttlA1 > now);
+  // Sisa TTL harus sekitar 300 detik (+- 5 detik)
+  assert.ok(ttlA1 - now <= 300 * 1000 && ttlA1 - now >= 290 * 1000);
+
+  // 4. Invalidate single token
+  invalidateTokenCache(tokenB1);
+  assert.equal(getVerifyCache(tokenB1), null);
+  assert.deepEqual(getVerifyCache(tokenA1), userA);
+
+  // 5. Invalidate user cache (semua token milik user A: tokenA1 & tokenA2 harus terhapus)
+  invalidateUserCache(userA.id);
+  assert.equal(getVerifyCache(tokenA1), null);
+  assert.equal(getVerifyCache(tokenA2), null);
+
+  // 6. Clear all cache
+  setVerifyCache('token-temp', { temp: true }, 60);
+  assert.ok(getVerifyCache('token-temp'));
+  clearAllCache();
+  assert.equal(getVerifyCache('token-temp'), null);
+});
+
+test('11. /api/user/verify Caching & Invalidation Integration Tests (HIT/MISS & TTL)', async () => {
+  clearAllCache();
+  process.env.JWT_SECRET = 'test_jwt_secret_integration';
+
+  const server = app.listen(0);
+  const port = server.address().port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  const dummyUser = {
+    id: 'user-uuid-integration-123',
+    username: 'guru_kimia',
+    nama_lengkap: 'Dr. Kimia',
+    role: USER_ROLES.GURU,
+    status_aktif: true,
+    toJSON() {
+      return {
+        id: this.id,
+        username: this.username,
+        nama_lengkap: this.nama_lengkap,
+        role: this.role,
+        status_aktif: this.status_aktif
+      };
+    }
+  };
+
+  // Stub User.findByPk untuk simulasi database lookup
+  const originalFindByPk = User.findByPk;
+  let dbCallCount = 0;
+  User.findByPk = async (id) => {
+    dbCallCount++;
+    if (id === dummyUser.id) return dummyUser;
+    return null;
+  };
+
+  try {
+    // Generate valid JWT dengan masa aktif 2 jam (7200 detik)
+    const token = jwt.sign(
+      { id: dummyUser.id, username: dummyUser.username, role: dummyUser.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '2h' }
+    );
+
+    // Panggilan 1: Cache MISS (pertama kali dipanggil, query DB)
+    const res1 = await fetch(`${baseUrl}/api/user/verify`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      }
+    });
+    assert.equal(res1.status, 200);
+    assert.equal(res1.headers.get('x-cache'), 'MISS');
+    assert.equal(dbCallCount, 1);
+    const body1 = await res1.json();
+    assert.equal(body1.success, true);
+    assert.equal(body1.data.username, 'guru_kimia');
+
+    // Verifikasi TTL di cache sesuai dengan exp JWT (sekitar 7200 detik)
+    const cachedTtl = verifyCache.getTtl(token);
+    const expectedExpMs = jwt.decode(token).exp * 1000;
+    assert.ok(Math.abs(cachedTtl - expectedExpMs) < 2000); // toleransi 2 detik
+
+    // Panggilan 2: Cache HIT (token yang sama, langsung dari cache tanpa hit DB)
+    const res2 = await fetch(`${baseUrl}/api/user/verify`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      }
+    });
+    assert.equal(res2.status, 200);
+    assert.equal(res2.headers.get('x-cache'), 'HIT');
+    assert.equal(dbCallCount, 1); // dbCallCount TIDAK bertambah karena HIT cache!
+    const body2 = await res2.json();
+    assert.deepEqual(body2.data, body1.data);
+
+    // Simulasi Invalidasi: User ubah profil / password
+    dummyUser.nama_lengkap = 'Dr. Kimia M.Si';
+    invalidateUserCache(dummyUser.id);
+
+    // Panggilan 3: Cache MISS kembali karena cache user telah di-invalidate
+    const res3 = await fetch(`${baseUrl}/api/user/verify`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      }
+    });
+    assert.equal(res3.status, 200);
+    assert.equal(res3.headers.get('x-cache'), 'MISS');
+    assert.equal(dbCallCount, 2); // DB dipanggil kembali
+    const body3 = await res3.json();
+    assert.equal(body3.data.nama_lengkap, 'Dr. Kimia M.Si');
+
+    // Panggilan 4: Cache HIT kembali setelah data baru tersimpan di cache
+    const res4 = await fetch(`${baseUrl}/api/user/verify`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      }
+    });
+    assert.equal(res4.status, 200);
+    assert.equal(res4.headers.get('x-cache'), 'HIT');
+    assert.equal(dbCallCount, 2);
+  } finally {
+    User.findByPk = originalFindByPk;
+    server.close();
+    clearAllCache();
   }
 });
