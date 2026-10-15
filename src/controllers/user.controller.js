@@ -1,6 +1,11 @@
 import jwt from 'jsonwebtoken';
 import { User } from '../models/user.model.js';
 import { extractToken } from '../middlewares/auth.middleware.js';
+import {
+  getVerifyCache,
+  setVerifyCache,
+  invalidateUserCache
+} from '../services/cache.service.js';
 
 const getJwtSecret = () => {
   const secret = process.env.JWT_SECRET;
@@ -74,6 +79,7 @@ export const verify = async (req, res, next) => {
   try {
     // Jika sudah diverifikasi oleh middleware authenticate
     if (req.user) {
+      res.setHeader('X-Cache', 'BYPASS');
       return res.status(200).json({
         success: true,
         message: 'Token terverifikasi dengan valid',
@@ -89,6 +95,20 @@ export const verify = async (req, res, next) => {
         message: 'Autentikasi gagal: access_token tidak ditemukan'
       });
     }
+
+    // 1. Cek Cache terlebih dahulu (Cache HIT)
+    const cachedUser = getVerifyCache(token);
+    if (cachedUser) {
+      res.setHeader('X-Cache', 'HIT');
+      return res.status(200).json({
+        success: true,
+        message: 'Token terverifikasi dengan valid',
+        data: cachedUser
+      });
+    }
+
+    // 2. Cache MISS: verifikasi JWT dan lookup DB
+    res.setHeader('X-Cache', 'MISS');
 
     const jwtSecret = getJwtSecret();
     let decoded;
@@ -122,10 +142,19 @@ export const verify = async (req, res, next) => {
       });
     }
 
+    const userData = user.toJSON();
+
+    // Hitung sisa TTL dari decoded.exp (dalam detik) agar expired cache sinkron dengan JWT
+    const nowInSeconds = Math.floor(Date.now() / 1000);
+    const remainingTtl = decoded.exp ? Math.max(1, decoded.exp - nowInSeconds) : 3600;
+
+    // Simpan ke cache
+    setVerifyCache(token, userData, remainingTtl, user.id);
+
     return res.status(200).json({
       success: true,
       message: 'Token terverifikasi dengan valid',
-      data: user.toJSON()
+      data: userData
     });
   } catch (error) {
     next(error);
@@ -166,6 +195,9 @@ export const updateProfile = async (req, res, next) => {
 
     await user.update(fieldsToUpdate);
 
+    // Invalidasi seluruh token cache milik user ini agar data verify selalu sinkron
+    invalidateUserCache(user.id);
+
     return res.status(200).json({
       success: true,
       message: 'Profil berhasil diperbarui',
@@ -197,6 +229,9 @@ export const changePassword = async (req, res, next) => {
     // Set password baru (hook beforeUpdate akan otomatis melakukan hashing bcrypt)
     user.password = new_password;
     await user.save();
+
+    // Invalidasi seluruh token cache milik user ini setelah ganti password
+    invalidateUserCache(user.id);
 
     return res.status(200).json({
       success: true,
