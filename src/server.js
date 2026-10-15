@@ -4,10 +4,12 @@ import { testDbConnection } from './config/database.js';
 
 dotenv.config();
 
-const PORT = process.env.PORT || 3002;
+const PORT = process.env.PORT || 3000;
 
 const startServer = async () => {
   try {
+    // Cek koneksi ke PostgreSQL
+    await testDbConnection();
 
     app.listen(PORT, () => {
       console.log(`🚀 Server berjalan di http://localhost:${PORT}`);
